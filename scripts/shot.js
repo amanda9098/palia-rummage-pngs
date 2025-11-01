@@ -4,68 +4,64 @@ import fs from "fs/promises";
 
 const VIEWPORT_W = parseInt(process.env.VIEWPORT_W || "1600", 10);
 const VIEWPORT_H = parseInt(process.env.VIEWPORT_H || "1000", 10);
-const DEVICE_SCALE = parseFloat(process.env.DEVICE_SCALE || "1.5"); // sharper output
+const DEVICE_SCALE = parseFloat(process.env.DEVICE_SCALE || "1.75"); // crisp but not huge
 
-// TH.GL targets
+// Your three targets
 const TARGETS = [
   { url: "https://palia.th.gl/rummage-pile?map=kilima-valley", out: "docs/kilima.png" },
   { url: "https://palia.th.gl/rummage-pile?map=bahari-bay",    out: "docs/bahari.png" },
   { url: "https://palia.th.gl/rummage-pile?map=elderwood",     out: "docs/elderwood.png" },
 ];
 
-// Candidate selectors that typically represent the map area
-const CANDIDATES = [
-  "canvas.maplibregl-canvas",      // MapLibre / maplibre-gl
-  ".maplibregl-canvas",
-  "#map canvas",
-  "#map",
-  ".leaflet-pane .leaflet-layer",  // Leaflet fallback
-  ".leaflet-pane",
-  "main canvas",
-  "canvas"
-];
-
-// Find the biggest visible candidate element and screenshot just that.
-// Falls back to full page if nothing good is found.
-async function screenshotMapArea(page) {
-  // wait for the page to be mostly idle
+/**
+ * Find the DOM box that holds the whole map (not the tabs/header).
+ * Priority: .maplibregl-map -> #map -> .leaflet-container -> canvas parent chain.
+ */
+async function getMapBoundingBox(page) {
+  // wait for app to finish rendering
   await page.waitForLoadState("networkidle", { timeout: 60_000 });
 
-  // try selector list first
-  for (const sel of CANDIDATES) {
+  // Try a few known containers first
+  const selectors = [
+    ".maplibregl-map",         // MapLibre root
+    "#map",                    // generic id some apps use
+    ".leaflet-container"       // Leaflet root
+  ];
+
+  for (const sel of selectors) {
     const loc = page.locator(sel).first();
-    const count = await loc.count();
-    if (!count) continue;
-
-    try {
-      await loc.waitFor({ state: "visible", timeout: 10_000 });
-      const handle = await loc.elementHandle();
-      // make sure it's on screen
-      await handle.scrollIntoViewIfNeeded();
-      return await loc.screenshot({ type: "png" });
-    } catch (_) {
-      // try next selector
+    if (await loc.count()) {
+      try {
+        await loc.waitFor({ state: "visible", timeout: 10_000 });
+        const box = await loc.boundingBox();
+        if (box && box.width > 400 && box.height > 300) return box;
+      } catch {}
     }
   }
 
-  // fallback: pick the largest visible <canvas> by area
-  const handles = await page.$$("canvas");
-  let best = null, bestBox = null;
-  for (const h of handles) {
-    const box = await h.boundingBox();
-    if (!box) continue;
-    const area = box.width * box.height;
-    if (box.width >= 400 && box.height >= 300 && (!best || area > bestBox.width * bestBox.height)) {
-      best = h; bestBox = box;
-    }
-  }
-  if (best) {
-    await best.scrollIntoViewIfNeeded();
-    return await best.screenshot({ type: "png" });
+  // Fallback: start from the canvas and walk up to a large ancestor
+  const canvas = await page.$("canvas.maplibregl-canvas") || await page.$("canvas");
+  if (canvas) {
+    // climb up to the nearest sizeable ancestor (likely .maplibregl-map)
+    const box = await page.evaluate((el) => {
+      function good(r){ return r && r.width > 400 && r.height > 300 && r.height < window.innerHeight * 0.95; }
+      let node = el;
+      let best = null;
+      while (node) {
+        const r = node.getBoundingClientRect();
+        if (good(r)) best = r;
+        // stop at the first element that’s clearly the container
+        if (node.classList && (node.classList.contains("maplibregl-map") || node.id === "map")) break;
+        node = node.parentElement;
+      }
+      if (!best) best = el.getBoundingClientRect();
+      return { x: best.x, y: best.y, width: best.width, height: best.height };
+    }, canvas);
+    return box;
   }
 
-  // last resort: full page
-  return await page.screenshot({ fullPage: true, type: "png" });
+  // Last resort: whole viewport
+  return { x: 0, y: 0, width: VIEWPORT_W, height: VIEWPORT_H };
 }
 
 async function snapOne(url, outfile) {
@@ -73,24 +69,37 @@ async function snapOne(url, outfile) {
   try {
     const context = await browser.newContext({
       viewport: { width: VIEWPORT_W, height: VIEWPORT_H },
-      deviceScaleFactor: DEVICE_SCALE,
+      deviceScaleFactor: DEVICE_SCALE
     });
     const page = await context.newPage();
 
-    // navigate & crop (with one retry)
+    // Try up to 2 attempts in case the map finishes sizing late
     for (let attempt = 1; attempt <= 2; attempt++) {
-      try {
-        await page.goto(url, { waitUntil: "networkidle", timeout: 120_000 });
-        const buf = await screenshotMapArea(page);
+      await page.goto(url, { waitUntil: "networkidle", timeout: 120_000 });
+
+      const box = await getMapBoundingBox(page);
+
+      // small padding to include the map frame but avoid tabs (tune as needed)
+      const P = 8;
+      const clip = {
+        x: Math.max(0, box.x - P),
+        y: Math.max(0, box.y - P),
+        width: Math.min(box.width + P * 2, VIEWPORT_W),
+        height: Math.min(box.height + P * 2, VIEWPORT_H)
+      };
+
+      // Ensure clip stays within the page
+      if (clip.width > 0 && clip.height > 0) {
+        const buf = await page.screenshot({ type: "png", clip });
         await fs.mkdir("docs", { recursive: true });
         await fs.writeFile(outfile, buf);
         return;
-      } catch (e) {
-        if (attempt === 2) throw e;
-        // small wait then retry once
-        await page.waitForTimeout(2000);
       }
+
+      // If the box looked wrong on first attempt, wait and retry once
+      if (attempt === 1) await page.waitForTimeout(2000);
     }
+    throw new Error("Could not compute a valid map bounding box.");
   } finally {
     await browser.close();
   }
