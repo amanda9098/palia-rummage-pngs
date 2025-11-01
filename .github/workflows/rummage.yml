@@ -2,13 +2,17 @@ name: Build rummage PNGs
 
 on:
   schedule:
-    - cron: "*/15 * * * *"
-  workflow_dispatch:
+    - cron: "*/15 * * * *"    # every 15 minutes; change as you like
+  workflow_dispatch:           # <— enables the "Run workflow" button
 
 permissions:
-  contents: write        # allow committing PNGs to the repo
-  pages: write           # allow Pages to publish (satisfies the pages workflow)
+  contents: write
+  pages: write
   id-token: write
+
+concurrency:
+  group: rummage
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -29,12 +33,20 @@ jobs:
         run: npx playwright install --with-deps chromium
 
       - name: Generate screenshots
-  env:
-    VIEWPORT_W: "1920"
-    VIEWPORT_H: "1200"
-    DEVICE_SCALE: "2"
-    STABILIZE_MS: "1200"
-    KILIMA_SELECTOR: ".leaflet-container"
-    BAHARI_SELECTOR: ".leaflet-container"
-    ELDERWOOD_SELECTOR: ".leaflet-container"
-  run: npm run shot
+        env:
+          VIEWPORT_W: "1920"
+          VIEWPORT_H: "1200"
+          DEVICE_SCALE: "2"
+          STABILIZE_MS: "1200"
+          KILIMA_SELECTOR: ".leaflet-container"
+          BAHARI_SELECTOR: ".leaflet-container"
+          ELDERWOOD_SELECTOR: ".leaflet-container"
+        run: npm run shot
+
+      - name: Commit PNGs to docs/
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add docs/kilima.png docs/bahari.png docs/elderwood.png
+          git commit -m "update rummage pngs" || echo "No changes to commit"
+          git push
