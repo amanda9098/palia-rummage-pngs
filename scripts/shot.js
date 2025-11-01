@@ -1,41 +1,30 @@
-// scripts/shot.js — robust "union-of-map-layers" crop (no missing edges)
+// scripts/shot.js — unify crops to the full map container (Kilima framing for all)
 import { chromium } from "playwright";
 import fs from "fs/promises";
 
-const VIEWPORT_W = parseInt(process.env.VIEWPORT_W || "1600", 10);
-const VIEWPORT_H = parseInt(process.env.VIEWPORT_H || "1000", 10);
-const DEVICE_SCALE = parseFloat(process.env.DEVICE_SCALE || "2"); // crisp PNGs
-const PADDING = parseInt(process.env.MAP_PADDING || "8", 10);     // extra pixels around map
+const VIEWPORT_W = parseInt(process.env.VIEWPORT_W || "1920", 10);
+const VIEWPORT_H = parseInt(process.env.VIEWPORT_H || "1200", 10);
+const DEVICE_SCALE = parseFloat(process.env.DEVICE_SCALE || "2"); // crisp
+const STABILIZE_MS = parseInt(process.env.STABILIZE_MS || "800", 10);
 
+// Optional selector overrides per-map (if ever needed)
+const KILIMA_SELECTOR   = process.env.KILIMA_SELECTOR   || ".maplibregl-map";
+const BAHARI_SELECTOR   = process.env.BAHARI_SELECTOR   || ".maplibregl-map";
+const ELDERWOOD_SELECTOR= process.env.ELDERWOOD_SELECTOR|| ".maplibregl-map";
+
+// Targets (unchanged)
 const TARGETS = [
-  { url: "https://palia.th.gl/rummage-pile?map=kilima-valley", out: "docs/kilima.png" },
-  { url: "https://palia.th.gl/rummage-pile?map=bahari-bay",    out: "docs/bahari.png" },
-  { url: "https://palia.th.gl/rummage-pile?map=elderwood",     out: "docs/elderwood.png" },
+  { url: "https://palia.th.gl/rummage-pile?map=kilima-valley", out: "docs/kilima.png",    sel: KILIMA_SELECTOR },
+  { url: "https://palia.th.gl/rummage-pile?map=bahari-bay",    out: "docs/bahari.png",    sel: BAHARI_SELECTOR },
+  { url: "https://palia.th.gl/rummage-pile?map=elderwood",     out: "docs/elderwood.png", sel: ELDERWOOD_SELECTOR },
 ];
 
-// Everything that could be part of the visible map (canvases, grid, tiles, panes)
-const MAP_LAYER_SELECTORS = [
-  ".maplibregl-canvas",
-  ".maplibregl-canvas-container",
-  ".maplibregl-layer",            // some themes add this
-  ".leaflet-pane",
-  ".leaflet-layer",
-  "#map canvas",
-  "#map .leaflet-pane",
-  "canvas"                        // final fallback
-];
+const FALLBACKS = ["#map", ".leaflet-container"];
 
-// Elements we explicitly want to exclude from the crop
-const EXCLUDE_SELECTORS = [
-  "header", "nav", "footer",
-  ".tabs", ".tabbar",
-  ".maplibregl-control-container", // zoom controls, attribution, etc.
-];
-
+// Hide page chrome so only the map container is visible
 async function hideChrome(page) {
-  // Hide obvious non-map chrome so it doesn't expand our union rect
   await page.addStyleTag({ content: `
-    ${EXCLUDE_SELECTORS.join(",")} {
+    header, nav, footer, .tabs, .tabbar, .maplibregl-control-container {
       display: none !important;
       visibility: hidden !important;
       opacity: 0 !important;
@@ -44,61 +33,50 @@ async function hideChrome(page) {
   `});
 }
 
-/**
- * Compute the union bounding box of all relevant map layers.
- * Returns {x, y, width, height} in CSS pixels (not dpr-scaled).
- */
-async function getTightMapRect(page) {
-  // Wait until at least one canvas is there
-  await page.waitForSelector("canvas", { state: "visible", timeout: 30_000 });
+// Wait until element exists, is visible, and its size has "settled" for STABILIZE_MS
+async function waitSizeStable(page, selector) {
+  const loc = page.locator(selector).first();
+  await loc.waitFor({ state: "visible", timeout: 30000 });
 
-  return await page.evaluate(({ MAP_LAYER_SELECTORS, EXCLUDE_SELECTORS, PADDING }) => {
-    // Helper: is element excluded?
-    const isExcluded = (el) => {
-      return EXCLUDE_SELECTORS.some(sel => el.closest(sel));
-    };
+  // poll bounding box until unchanged for STABILIZE_MS
+  let last = null;
+  const start = Date.now();
+  let stableSince = Date.now();
 
-    // Collect rects
-    const rects = [];
-    for (const sel of MAP_LAYER_SELECTORS) {
-      const nodes = Array.from(document.querySelectorAll(sel));
-      for (const el of nodes) {
-        if (!(el instanceof HTMLElement)) continue;
-        if (!el.offsetParent) continue;              // not visible/attached
-        if (isExcluded(el)) continue;
-
-        const r = el.getBoundingClientRect();
-        if (r.width >= 100 && r.height >= 80) {      // ignore tiny bits
-          rects.push(r);
-        }
-      }
+  while (Date.now() - start < 15000) {
+    const box = await loc.boundingBox();
+    if (!box || box.width < 100 || box.height < 100) {
+      await page.waitForTimeout(100);
+      continue;
     }
-
-    if (!rects.length) {
-      // As a last resort, use the viewport (caller will handle)
-      return null;
+    const asKey = `${Math.round(box.x)}:${Math.round(box.y)}:${Math.round(box.width)}:${Math.round(box.height)}`;
+    if (asKey === last) {
+      if (Date.now() - stableSince >= STABILIZE_MS) return loc; // stable long enough
+    } else {
+      last = asKey;
+      stableSince = Date.now();
     }
-
-    // Union
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    for (const r of rects) {
-      minX = Math.min(minX, r.left);
-      minY = Math.min(minY, r.top);
-      maxX = Math.max(maxX, r.right);
-      maxY = Math.max(maxY, r.bottom);
-    }
-
-    // Pad a bit to avoid tight clipping on borders
-    minX = Math.max(0, Math.floor(minX) - PADDING);
-    minY = Math.max(0, Math.floor(minY) - PADDING);
-    maxX = Math.ceil(maxX) + PADDING;
-    maxY = Math.ceil(maxY) + PADDING;
-
-    return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
-  }, { MAP_LAYER_SELECTORS, EXCLUDE_SELECTORS, PADDING });
+    await page.waitForTimeout(100);
+  }
+  return loc; // good enough
 }
 
-async function snapOne(url, outfile) {
+async function captureMap(page, primarySelector) {
+  // Try primary selector; if not present, fall back
+  let sel = primarySelector;
+  if (!(await page.locator(sel).count())) {
+    for (const fb of FALLBACKS) {
+      if (await page.locator(fb).count()) { sel = fb; break; }
+    }
+  }
+  const loc = await waitSizeStable(page, sel);
+  // Scroll into view (no-op if already)
+  await loc.scrollIntoViewIfNeeded();
+  // Element screenshot (captures full element even outside viewport)
+  return await loc.screenshot({ type: "png", animations: "disabled" });
+}
+
+async function snapOne(url, outfile, selector) {
   const browser = await chromium.launch();
   try {
     const context = await browser.newContext({
@@ -107,49 +85,20 @@ async function snapOne(url, outfile) {
     });
     const page = await context.newPage();
 
-    // Two attempts in case late layout changes size
     for (let attempt = 1; attempt <= 2; attempt++) {
-      await page.goto(url, { waitUntil: "networkidle", timeout: 120_000 });
+      await page.goto(url, { waitUntil: "networkidle", timeout: 120000 });
       await hideChrome(page);
 
-      const rect = await getTightMapRect(page);
-
-      if (rect && rect.width > 0 && rect.height > 0) {
-        // Ensure viewport can fully contain our clip rectangle
-        const needW = Math.max(VIEWPORT_W, Math.ceil(rect.x + rect.width) + 1);
-        const needH = Math.max(VIEWPORT_H, Math.ceil(rect.y + rect.height) + 1);
-        await page.setViewportSize({ width: needW, height: needH });
-
-        // Scroll so top-left of clip is in view (Playwright requires clip to be within the page)
-        await page.mouse.wheel(0, -99999);
-        await page.evaluate((x, y) => window.scrollTo({ left: 0, top: 0 }));
-        // No-op if page isn't scrollable, that's fine.
-
-        const buf = await page.screenshot({
-          type: "png",
-          clip: {
-            x: rect.x,
-            y: rect.y,
-            width: rect.width,
-            height: rect.height,
-          },
-          animations: "disabled",
-        });
-
+      try {
+        const buf = await captureMap(page, selector);
         await fs.mkdir("docs", { recursive: true });
         await fs.writeFile(outfile, buf);
         return;
+      } catch (e) {
+        if (attempt === 1) { await page.waitForTimeout(1000); continue; }
+        throw e;
       }
-
-      // Fallback (first attempt only): wait and retry once
-      if (attempt === 1) await page.waitForTimeout(2000);
     }
-
-    // Absolute fallback: element screenshot of the biggest canvas
-    const biggestCanvas = page.locator("canvas").first();
-    const buf = await biggestCanvas.screenshot({ type: "png", animations: "disabled" });
-    await fs.mkdir("docs", { recursive: true });
-    await fs.writeFile(outfile, buf);
   } finally {
     await browser.close();
   }
@@ -157,13 +106,10 @@ async function snapOne(url, outfile) {
 
 async function run() {
   for (const t of TARGETS) {
-    console.log("Shooting:", t.url);
-    await snapOne(t.url, t.out);
+    console.log("Shooting:", t.url, "with selector:", t.sel);
+    await snapOne(t.url, t.out, t.sel);
     console.log("Wrote:", t.out);
   }
 }
 
-run().catch(err => {
-  console.error(err);
-  process.exit(1);
-});
+run().catch(err => { console.error(err); process.exit(1); });
