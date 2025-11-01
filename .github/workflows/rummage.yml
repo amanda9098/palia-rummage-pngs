@@ -29,15 +29,12 @@ jobs:
         run: npx playwright install --with-deps chromium
 
       - name: Generate screenshots
-        env:
-          VIEWPORT_W: "1600"
-          VIEWPORT_H: "1000"
-        run: npm run shot
-
-      - name: Commit PNGs to docs/
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add docs/kilima.png docs/bahari.png docs/elderwood.png
-          git commit -m "update rummage pngs" || echo "No changes to commit"
-          git push
+  env:
+    VIEWPORT_W: "1920"
+    VIEWPORT_H: "1200"
+    DEVICE_SCALE: "2"
+    STABILIZE_MS: "1200"
+    KILIMA_SELECTOR: ".leaflet-container"
+    BAHARI_SELECTOR: ".leaflet-container"
+    ELDERWOOD_SELECTOR: ".leaflet-container"
+  run: npm run shot
