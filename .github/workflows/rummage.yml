@@ -47,17 +47,15 @@ jobs:
           npx playwright install-deps chromium
           npx playwright install chromium
 
-      - name: Generate screenshots
+            - name: Generate screenshots
         env:
           VIEWPORT_W: "1920"
           VIEWPORT_H: "1200"
           DEVICE_SCALE: "2"
           STABILIZE_MS: "1200"
-          # force the full map box for all 3:
-          KILIMA_SELECTOR: ".leaflet-container"
-          BAHARI_SELECTOR: ".leaflet-container"
-          ELDERWOOD_SELECTOR: ".leaflet-container"
+          MAP_PADDING: "10"
         run: npm run shot
+
 
       - name: Ensure docs/ exists (even on first run)
         run: mkdir -p docs
