@@ -2,11 +2,11 @@ name: Build rummage PNGs
 
 on:
   schedule:
-    - cron: "*/15 * * * *"     # every 15 minutes
-  workflow_dispatch:            # manual "Run workflow" button
+    - cron: "*/30 * * * *"   # every 30 minutes (adjust if you want)
+  workflow_dispatch:          # << shows the "Run workflow" button
 
 permissions:
-  contents: write
+  contents: write             # needed to commit pngs
   pages: write
   id-token: write
 
@@ -23,53 +23,43 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Print env (debug)
-        run: |
-          uname -a
-          node -v || true
-          npm -v || true
-
       - name: Setup Node 20
         uses: actions/setup-node@v4
         with:
           node-version: "20"
 
-      - name: Install deps (npm ci if lockfile exists)
+      - name: Install NPM deps
         run: |
-          if [ -f package-lock.json ]; then
-            npm ci
-          else
-            npm install
-          fi
+          if [ -f package-lock.json ]; then npm ci; else npm install; fi
 
-      - name: Install Playwright Chromium (and system deps)
+      - name: Install Playwright Chromium + system deps
         run: |
           npx playwright install-deps chromium
           npx playwright install chromium
 
-            - name: Generate screenshots
+      - name: Generate screenshots (never fail)
         env:
           VIEWPORT_W: "1920"
           VIEWPORT_H: "1200"
           DEVICE_SCALE: "2"
           STABILIZE_MS: "1200"
           MAP_PADDING: "10"
-        run: npm run shot
-
-
-      - name: Ensure docs/ exists (even on first run)
-        run: mkdir -p docs
-
-      - name: List outputs (debug)
         run: |
-          file docs/kilima.png || true
-          file docs/bahari.png || true
-          file docs/elderwood.png || true
-          ls -lh docs || true
+          mkdir -p docs
+          # run; if it fails, do not break the job
+          npm run shot || true
 
-      - name: Commit PNGs to docs/
+      - name: Ensure 3 PNGs exist (create placeholders if missing)
         run: |
-          git config user.name "github-actions[bot]"
+          place() { convert -size 1600x900 xc:black -fill white -pointsize 28 \
+            -gravity center -annotate 0 "$1" "$2"; }
+          if ! [ -f docs/kilima.png ];   then place "kilima capture failed"   docs/kilima.png; fi
+          if ! [ -f docs/bahari.png ];   then place "bahari capture failed"   docs/bahari.png; fi
+          if ! [ -f docs/elderwood.png ]; then place "elderwood capture failed" docs/elderwood.png; fi
+        shell: bash
+      - name: Commit updated PNGs
+        run: |
+          git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add docs/kilima.png docs/bahari.png docs/elderwood.png
           git commit -m "update rummage pngs" || echo "No changes to commit"
