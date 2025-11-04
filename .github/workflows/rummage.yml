@@ -1,24 +1,25 @@
 name: Update rummage PNGs
+
 on:
   workflow_dispatch:
   schedule:
-    - cron: "12 14 * * *"   # daily run; adjust UTC time if you want
+    - cron: '12 14 * * *'   # daily run; adjust UTC time if you want
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write       # let the job push commits
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          persist-credentials: false
 
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: '20'
 
-          - name: Install deps
+      - name: Install deps
         run: |
           npm install --no-audit --no-fund
           npx playwright install --with-deps chromium
@@ -36,7 +37,7 @@ jobs:
 
       - name: Commit & push if changed
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -e
           git config user.name "github-actions[bot]"
@@ -47,4 +48,4 @@ jobs:
             exit 0
           fi
           git commit -m "update rummage pngs"
-          git push "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git" HEAD:${GITHUB_REF#refs/heads/}
+          git push
