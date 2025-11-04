@@ -19,4 +19,32 @@ function isValidPng(buf) {
 }
 
 (async () => {
-  if
+  if (!fs.existsSync(OUTDIR)) fs.mkdirSync(OUTDIR, { recursive: true });
+
+  const browser = await chromium.launch({ headless: true });
+  const ctx = await browser.newContext({ deviceScaleFactor: 2, viewport: { width: 1600, height: 900 } });
+  const page = await ctx.newPage();
+
+  for (const { name, url } of SHOTS) {
+    console.log(`[shot] ${name} ← ${url}`);
+    await page.goto(url, { waitUntil: 'networkidle', timeout: 60_000 });
+
+    // give the tiles/canvas time to render
+    await page.waitForTimeout(3000);
+
+    const buf = await page.screenshot({ type: 'png', fullPage: true });
+
+    if (!isValidPng(buf) || buf.length < MIN_BYTES) {
+      throw new Error(`Refusing to write ${name}: invalid/too-small PNG (len=${buf?.length ?? 0})`);
+    }
+
+    const outPath = path.join(OUTDIR, name);
+    fs.writeFileSync(outPath, buf); // binary write (NO encoding option)
+    console.log(`[ok] wrote ${outPath} (${buf.length} bytes)`);
+  }
+
+  await browser.close();
+})().catch(err => {
+  console.error('[shot] failed:', err);
+  process.exit(1);
+});
