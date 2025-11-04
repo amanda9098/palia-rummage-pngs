@@ -1,9 +1,7 @@
 // scripts/shot.js
-// Takes 3 screenshots from palia.th.gl and ensures the whole map is visible.
-// - Zooms the MAP UI itself (wheel + Ctrl+- fallback)
-// - Optionally shrinks page via CSS zoom
-// - Hides common overlays
-// - Validates PNG bytes before committing
+// Screenshot the visible map area from palia.th.gl for 3 regions.
+// No scrolling/zooming. We wait for tiles/canvas to render, then
+// screenshot the biggest map element (canvas/img/map container).
 
 const { chromium } = require('playwright');
 const fs = require('fs');
@@ -16,7 +14,8 @@ const SHOTS = [
   { name: 'elderwood.png', url: 'https://palia.th.gl/rummage-pile?map=elderwood' },
 ];
 
-const MIN_BYTES = 50_000; // sanity threshold to avoid committing corrupt images
+// Smallest allowed image (guards against corrupt 0-byte/HTML screenshots)
+const MIN_BYTES = 20_000;
 
 function isValidPng(buf) {
   if (!buf || buf.length < 100) return false;
@@ -24,57 +23,65 @@ function isValidPng(buf) {
   return buf.subarray(0, 8).equals(sig);
 }
 
-// Try to locate the map element (covers Leaflet, Mapbox GL, canvases, etc.)
-async function findMapLocator(page) {
-  const sel = [
+// Wait until tiles/canvas are actually drawn (generic heuristic)
+async function waitForMapRender(page, timeout = 20_000) {
+  await page.waitForFunction(() => {
+    // loaded map tiles (Leaflet/Mapbox/etc.)
+    const imgs = Array.from(document.querySelectorAll('img')).filter(i =>
+      i.naturalWidth > 0 &&
+      i.naturalHeight > 0 &&
+      i.offsetParent !== null &&
+      /(tile|map|leaflet|mapbox|raster|png|jpg)/i.test(i.src || '')
+    );
+    if (imgs.length >= 4) return true;
+
+    // large visible canvas also counts
+    const canvases = Array.from(document.querySelectorAll('canvas'))
+      .filter(c => c.width >= 800 && c.height >= 600 && c.offsetParent !== null);
+    return canvases.length > 0;
+  }, { timeout });
+}
+
+// Choose the largest likely "map" element to screenshot
+async function getMapLocator(page) {
+  // Common containers first
+  const candidates = [
     '.leaflet-container',
-    '.mapboxgl-canvas',
     '.mapboxgl-map',
+    '.mapboxgl-canvas',
     '#map',
     '.map',
-    'canvas'
-  ].join(', ');
-  const loc = page.locator(sel).first();
-  await loc.waitFor({ state: 'visible', timeout: 20_000 });
-  return loc;
-}
+    'main',
+    'canvas',
+    'img'
+  ];
 
-// Zoom OUT using mouse wheel, centered on the element
-async function zoomOutWheel(page, mapLoc, steps = 12, delta = -1500) {
-  const box = await mapLoc.boundingBox();
-  if (!box) throw new Error('Map element has no bounding box');
-  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
-  for (let i = 0; i < steps; i++) {
-    await page.mouse.wheel(0, delta); // negative = zoom OUT on most map libs
-    await page.waitForTimeout(200);
+  // Try preferred selectors
+  for (const sel of candidates) {
+    const loc = page.locator(sel).first();
+    if (await loc.count()) {
+      try {
+        await loc.waitFor({ state: 'visible', timeout: 3000 });
+        const box = await loc.boundingBox();
+        if (box && box.width >= 600 && box.height >= 400) return loc;
+      } catch {}
+    }
   }
-}
 
-// Fallback zoom OUT using Ctrl + '-' keypresses (helps when wheel is blocked)
-async function zoomOutCtrlMinus(page, presses = 8) {
-  await page.keyboard.down('Control'); // works on Linux runners; ok for site UIs too
-  for (let i = 0; i < presses; i++) {
-    await page.keyboard.press('-');
-    await page.waitForTimeout(120);
-  }
-  await page.keyboard.up('Control');
-}
-
-// Remove visual clutter that may overlap the map
-async function hideOverlays(page) {
-  await page.addStyleTag({
-    content: `
-      .leaflet-control, .mapboxgl-ctrl, [class*="control"] { opacity: 0 !important; pointer-events: none !important; }
-      .leaflet-bottom.leaflet-right, .mapboxgl-ctrl-bottom-right { display: none !important; }
-      [class*="attribution"], .mapboxgl-ctrl-logo { display: none !important; }
-    `
+  // Fallback: pick the largest visible canvas/img on the page
+  const handle = await page.evaluateHandle(() => {
+    const els = Array.from(document.querySelectorAll('canvas, img'))
+      .filter(e => e.offsetParent !== null);
+    let best = null, bestArea = 0;
+    for (const e of els) {
+      const r = e.getBoundingClientRect();
+      const area = r.width * r.height;
+      if (area > bestArea) { best = e; bestArea = area; }
+    }
+    return best;
   });
-}
-
-// Optional: shrink the whole page (fits even more of the map in the same element box)
-async function applyPageZoom(page, factor = 0.8) {
-  await page.evaluate((f) => { document.documentElement.style.zoom = String(f); }, factor);
-  await page.waitForTimeout(200);
+  if (!handle) throw new Error('Could not find a map element to screenshot');
+  return page.locator('canvas, img').filter({ has: handle });
 }
 
 (async () => {
@@ -83,41 +90,31 @@ async function applyPageZoom(page, factor = 0.8) {
   const browser = await chromium.launch({ headless: true });
   const ctx = await browser.newContext({
     deviceScaleFactor: 2,
-    viewport: { width: 2200, height: 1400 },
+    viewport: { width: 2200, height: 1400 }
   });
   const page = await ctx.newPage();
 
   for (const { name, url } of SHOTS) {
     console.log(`[shot] ${name} ← ${url}`);
 
-    // 1) Open & let network settle
+    // 1) Navigate and let things settle
     await page.goto(url, { waitUntil: 'networkidle', timeout: 60_000 });
-    await page.waitForTimeout(1500);
+    await waitForMapRender(page, 20_000);
+    await page.waitForTimeout(300); // tiny extra settle
 
-    // 2) Find the map element
-    const mapLoc = await findMapLocator(page);
+    // 2) Get the map element as-is (no zoom/scroll)
+    const mapLoc = await getMapLocator(page);
 
-    // 3) Make the viewport roomy
-    await page.setViewportSize({ width: 2400, height: 1500 });
+    // Optional: hide controls/tabs so we only capture the map area
+    await page.addStyleTag({ content: `
+      .leaflet-control, .mapboxgl-ctrl, [class*="control"] { opacity: 0 !important; pointer-events: none !important; }
+      .leaflet-bottom.leaflet-right, .mapboxgl-ctrl-bottom-right { display: none !important; }
+    `});
 
-    // 4) Try zooming the MAP UI out aggressively
-    try {
-      await zoomOutWheel(page, mapLoc, 14, -1800);
-    } catch (e) {
-      console.warn('[shot] wheel zoom failed, trying Ctrl+- fallback:', e.message);
-      await zoomOutCtrlMinus(page, 10);
-    }
-
-    // 5) Optional page zoom (squeeze page to fit even more)
-    await applyPageZoom(page, 0.75);
-
-    // 6) Hide overlays/controls so the PNG is clean
-    await hideOverlays(page);
-
-    // 7) Screenshot **the map element** (not the whole page)
+    // 3) Screenshot the element
     const buf = await mapLoc.screenshot({ type: 'png', animations: 'disabled' });
 
-    // 8) Validate and write
+    // 4) Validate & write
     if (!isValidPng(buf) || buf.length < MIN_BYTES) {
       throw new Error(`Refusing to write ${name}: invalid/too-small PNG (len=${buf?.length ?? 0})`);
     }
