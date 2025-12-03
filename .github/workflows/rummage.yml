@@ -27,7 +27,7 @@ jobs:
       - name: Grab screenshots
         run: npm run grab
 
-      - name: Commit & push if changed
+      - name: Commit & push changes
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -35,9 +35,6 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add docs/*.png
-          if git diff --cached --quiet; then
-            echo "No changes to commit."
-            exit 0
-          fi
+          git diff
           git commit -m "update rummage pngs"
           git push
