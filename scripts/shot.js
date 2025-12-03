@@ -40,41 +40,8 @@ async function waitForMapRender(page, timeout = 25_000) {
 // Return a clip rect {x,y,width,height} for the biggest visible "map-like" element
 async function getMapClip(page) {
   const rect = await page.evaluate(() => {
-    function isVisible(el) {
-      const s = getComputedStyle(el);
-      if (s.visibility === 'hidden' || s.display === 'none') return false;
-      const r = el.getBoundingClientRect();
-      return r.width > 1 && r.height > 1 && r.bottom > 0 && r.right > 0;
-    }
-
-    // Prefer common containers/canvases/images
-    const preferredSel = [
-      '.leaflet-container',
-      '.mapboxgl-map',
-      '.mapboxgl-canvas',
-      '#map',
-      '.map'
-    ].join(',');
-
-    let candidates = Array.from(document.querySelectorAll(preferredSel))
-      .filter(isVisible);
-
-    if (candidates.length === 0) {
-      candidates = Array.from(document.querySelectorAll('canvas, img')).filter(isVisible);
-    }
-
-    if (candidates.length === 0) return null;
-
-    // Pick the largest by area
-    let best = candidates[0];
-    let bestArea = 0;
-    for (const el of candidates) {
-      const r = el.getBoundingClientRect();
-      const area = r.width * r.height;
-      if (area > bestArea) { best = el; bestArea = area; }
-    }
-    const r = best.getBoundingClientRect();
-    return { x: Math.max(0, r.x), y: Math.max(0, r.y), width: Math.max(1, r.width), height: Math.max(1, r.height) };
+    const container = document.querySelector('.leaflet-container');
+    return container.getBoundingClientRect();
   });
 
   if (!rect) throw new Error('Could not find a map element to clip');
@@ -130,13 +97,7 @@ async function gotoRetry(page, url, attempts = 3) {
 
     await gotoRetry(page, url, 3);
     await waitForMapRender(page, 25_000);
-
-    // Hide controls so we only capture the map area
-    await page.addStyleTag({ content: `
-      .leaflet-control, .mapboxgl-ctrl, [class*="control"] { opacity: 0 !important; pointer-events: none !important; }
-      .leaflet-bottom.leaflet-right, .mapboxgl-ctrl-bottom-right { display: none !important; }
-    `});
-    await page.waitForTimeout(2000);
+    await page.waitForTimeout(5000);
 
     const clip = await getMapClip(page);
 
@@ -152,7 +113,7 @@ async function gotoRetry(page, url, attempts = 3) {
 
     const outPath = path.join(OUTDIR, name);
     fs.writeFileSync(outPath, buf);
-    console.log(`[ok] wrote ${outPath} (${buf.length} bytes)`);
+    console.log(`[file] wrote ${outPath} (${buf.length} bytes)`);
   }
 
   await browser.close();
