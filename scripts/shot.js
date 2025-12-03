@@ -130,13 +130,13 @@ async function gotoRetry(page, url, attempts = 3) {
 
     await gotoRetry(page, url, 3);
     await waitForMapRender(page, 25_000);
-    await page.waitForTimeout(300);
 
     // Hide controls so we only capture the map area
     await page.addStyleTag({ content: `
       .leaflet-control, .mapboxgl-ctrl, [class*="control"] { opacity: 0 !important; pointer-events: none !important; }
       .leaflet-bottom.leaflet-right, .mapboxgl-ctrl-bottom-right { display: none !important; }
     `});
+    await page.waitForTimeout(2000);
 
     const clip = await getMapClip(page);
 
